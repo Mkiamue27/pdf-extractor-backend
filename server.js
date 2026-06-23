@@ -1,4 +1,3 @@
-```javascript
 const express = require('express');
 const multer = require('multer');
 const cors = require('cors');
@@ -118,4 +117,3 @@ app.listen(port, () => {
     `Server running on port ${port}`
   );
 });
-```
