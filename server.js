@@ -69,7 +69,7 @@ app.post(
       });
 
       // Parse JSON from OpenAI
-      const jsonString = response.choices.message.content;
+      const jsonString = response.choices[0].message.content;
       const data = JSON.parse(jsonString);
 
       // Convert parsed JSON into raw CSV row format strings
