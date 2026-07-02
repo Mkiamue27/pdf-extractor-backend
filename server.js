@@ -3,6 +3,7 @@ const multer = require('multer');
 const cors = require('cors');
 const Stripe = require('stripe');
 const { OpenAI } = require('openai');
+const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
 
 const app = express();
@@ -20,18 +21,51 @@ const stripe = new Stripe(process.env.STRIPE_API_KEY);
 
 const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
+
 /* ============================================================
    MIDDLEWARE
 ============================================================ */
 
 app.use(cors());
 
-/*
-============================================================
-STRIPE WEBHOOK
-MUST COME BEFORE express.json()
-============================================================
-*/
+/* ============================================================
+   HELPER FUNCTION
+============================================================ */
+
+async function upsertSubscription(subscription, status) {
+  const customerId = subscription.customer;
+
+  const payload = {
+    stripe_customer_id: customerId,
+    stripe_subscription_id: subscription.id,
+    status: status,
+    price_id: subscription.items?.data?.[0]?.price?.id || null,
+    current_period_end: subscription.current_period_end
+      ? new Date(subscription.current_period_end * 1000)
+      : null,
+    cancel_at_period_end: subscription.cancel_at_period_end || false,
+    updated_at: new Date(),
+  };
+
+  const { error } = await supabase
+    .from('Subscriptions')
+    .upsert(payload, { onConflict: 'stripe_customer_id' });
+
+  if (error) {
+    console.error('Supabase upsert error:', error.message);
+  } else {
+    console.log('Supabase subscription updated:', customerId);
+  }
+}
+
+/* ============================================================
+   STRIPE WEBHOOK
+   MUST COME BEFORE express.json()
+============================================================ */
 
 app.post(
   '/webhook',
@@ -57,57 +91,37 @@ app.post(
       switch (event.type) {
 
         case 'checkout.session.completed': {
-
           const session = event.data.object;
-
           console.log('Checkout Completed');
-          console.log(session);
 
-          // TODO:
-          // Update Firebase/Supabase
-          // Save Stripe Customer ID
-          // Save Subscription ID
-          // Activate User Plan
+          if (session.subscription) {
+            const subscription = await stripe.subscriptions.retrieve(
+              session.subscription
+            );
+            await upsertSubscription(subscription, 'active');
+          }
 
           break;
         }
 
         case 'customer.subscription.created': {
-
           const subscription = event.data.object;
-
           console.log('Subscription Created');
-          console.log(subscription);
-
-          // TODO:
-          // Update subscription status
-
+          await upsertSubscription(subscription, subscription.status);
           break;
         }
 
         case 'customer.subscription.updated': {
-
           const subscription = event.data.object;
-
           console.log('Subscription Updated');
-          console.log(subscription);
-
-          // TODO:
-          // Update subscription status
-
+          await upsertSubscription(subscription, subscription.status);
           break;
         }
 
         case 'customer.subscription.deleted': {
-
           const subscription = event.data.object;
-
           console.log('Subscription Deleted');
-          console.log(subscription);
-
-          // TODO:
-          // Downgrade user to Free plan
-
+          await upsertSubscription(subscription, 'canceled');
           break;
         }
 
@@ -118,23 +132,17 @@ app.post(
       res.json({ received: true });
 
     } catch (err) {
-
       console.error(err);
-
       res.status(500).json({
         error: 'Webhook processing failed.',
       });
-
     }
   }
 );
 
-/*
-============================================================
-NORMAL JSON PARSER
-Everything below this line uses express.json()
-============================================================
-*/
+/* ============================================================
+   NORMAL JSON PARSER
+============================================================ */
 
 app.use(express.json());
 
@@ -161,10 +169,7 @@ app.get('/health', (req, res) => {
    EXTRACTION ROUTES
 ============================================================ */
 
-/*
-Paste your existing /extract-invoice route here.
-No changes are required to that route.
-*/
+// Paste your /extract-invoice route here
 
 /* ============================================================
    SERVER
