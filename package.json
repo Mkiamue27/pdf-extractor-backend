@@ -16,6 +16,6 @@
     "multer": "^1.4.5-lts.1",
     "openai": "^4.104.0",
     "stripe": "^17.7.0",
-    "@supabse/supabse-js":  "^2.45.0"
+    "@supabase/supabase-js":  "^2.45.0"
   }
 }
