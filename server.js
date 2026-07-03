@@ -38,8 +38,10 @@ app.use(cors());
 
 async function upsertSubscription(subscription, status) {
   const customerId = subscription.customer;
+  const userId = subscription.metadata?.user_id || null;
 
   const payload = {
+    user_id: userId,
     stripe_customer_id: customerId,
     stripe_subscription_id: subscription.id,
     status: status,
@@ -163,6 +165,46 @@ app.get('/health', (req, res) => {
     status: 'ok',
     timestamp: new Date().toISOString(),
   });
+});
+
+/* ============================================================
+   CHECKOUT SESSION ROUTE
+============================================================ */
+
+app.post('/create-checkout-session', async (req, res) => {
+  const { priceId, userId, successUrl, cancelUrl } = req.body;
+
+  if (!priceId || !userId) {
+    return res.status(400).json({
+      error: 'priceId and userId are required.',
+    });
+  }
+
+  try {
+    const session = await stripe.checkout.sessions.create({
+      mode: 'subscription',
+      payment_method_types: ['card'],
+      line_items: [
+        {
+          price: priceId,
+          quantity: 1,
+        },
+      ],
+      subscription_data: {
+        metadata: {
+          user_id: userId,
+        },
+      },
+      success_url: successUrl || 'https://yourapp.com/success',
+      cancel_url: cancelUrl || 'https://yourapp.com/cancel',
+    });
+
+    res.json({ url: session.url });
+
+  } catch (err) {
+    console.error('Checkout session error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 /* ============================================================
