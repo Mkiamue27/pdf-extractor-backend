@@ -41,7 +41,7 @@ async function upsertSubscription(subscription, status) {
   const userId = subscription.metadata?.user_id || null;
 
   const payload = {
-    user_id: userId,
+    firebase_uid: userId,
     stripe_customer_id: customerId,
     stripe_subscription_id: subscription.id,
     status: status,
