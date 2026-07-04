@@ -48,6 +48,7 @@ async function upsertSubscription(subscription, status) {
 
   console.log('Price ID received:', priceId);
   console.log('Plan name resolved:', planName);
+  console.log('current_period_end raw:', subscription.current_period_end);
 
   const payload = {
     firebase_uid: userId,
@@ -57,7 +58,7 @@ async function upsertSubscription(subscription, status) {
     status: status,
     price_id: priceId,
     current_period_end: subscription.current_period_end
-      ? new Date(subscription.current_period_end * 1000)
+       ? new Date(subscription.current_period_end * 1000)
       : null,
     cancel_at_period_end: subscription.cancel_at_period_end || false,
     updated_at: new Date(),
