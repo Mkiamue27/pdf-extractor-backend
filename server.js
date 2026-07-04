@@ -117,10 +117,10 @@ app.post(
         }
 
         case 'customer.subscription.created': {
-          const subscription = event.data.object;
-          console.log('Subscription Created');
-          await upsertSubscription(subscription, subscription.status);
-          break;
+           const subscription = await stripe.subscriptions.retrieve(event.data.object.id);
+           console.log('Subscription Created');
+           await upsertSubscription(subscription, subscription.status);
+           break;
         }
 
         case 'customer.subscription.updated': {
