@@ -262,7 +262,46 @@ app.post('/create-checkout-session', async (req, res) => {
    EXTRACTION ROUTES
 ============================================================ */
 
-// Paste your /extract-invoice route here
+app.post('/extract-invoice', upload.single('file'), async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ error: 'No file uploaded under the field name "file".' });
+        }
+
+        // Convert file buffer to base64 for the OpenAI API payload
+        const pdfBase64 = req.file.buffer.toString('base64');
+
+        const response = await openai.chat.completions.create({
+            model: "gpt-4o",
+            messages: [
+                {
+                    role: "user",
+                    content: [
+                        { 
+                            type: "text", 
+                            text: "Extract all structural data from this invoice. Return the output strictly as clean, raw CSV formatting without any markdown code block wrappers (no ```csv)." 
+                        },
+                        {
+                            type: "image_url",
+                            url: {
+                                url: `data:application/pdf;base64,${pdfBase64}`
+                            }
+                        }
+                    ]
+                }
+            ]
+        });
+
+        const extractedCsv = response.choices[0].message.content;
+
+        res.setHeader('Content-Type', 'text/csv');
+        return res.status(200).send(extractedCsv);
+
+    } catch (error) {
+        console.error('Extraction Endpoint Error:', error.message);
+        return res.status(500).json({ error: 'Internal server error during PDF extraction.' });
+    }
+});
 
 /* ============================================================
    SERVER
