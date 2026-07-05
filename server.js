@@ -179,6 +179,46 @@ app.get('/health', (req, res) => {
 });
 
 /* ============================================================
+   GET SUBSCRIPTION ROUTE
+============================================================ */
+
+app.get('/get-subscription', async (req, res) => {
+  const { uid } = req.query;
+
+  if (!uid) {
+    return res.status(400).json({ error: 'uid is required.' });
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('Subscriptions')
+      .select('plan_name, status, current_period_end, cancel_at_period_end')
+      .eq('firebase_uid', uid)
+      .single();
+
+    if (error || !data) {
+      return res.json({
+        plan: 'free',
+        status: 'inactive',
+        current_period_end: null,
+        cancel_at_period_end: false,
+      });
+    }
+
+    res.json({
+      plan: data.plan_name || 'free',
+      status: data.status || 'inactive',
+      current_period_end: data.current_period_end,
+      cancel_at_period_end: data.cancel_at_period_end,
+    });
+
+  } catch (err) {
+    console.error('Get subscription error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* ============================================================
    CHECKOUT SESSION ROUTE
 ============================================================ */
 
