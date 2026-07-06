@@ -282,10 +282,8 @@ app.post('/extract-invoice', upload.single('file'), async (req, res) => {
                             text: "Extract all structural data from this invoice. Return the output strictly as clean, raw CSV formatting without any markdown code block wrappers (no ```csv)." 
                         },
                         {
-                            type: "image_url",
-                            url: {
-                                url: `data:application/pdf;base64,${pdfBase64}`
-                            }
+                            type: "text",
+                            text: 'Invoice Document Data (Base64 PDF Content): ${pdfBase64}'
                         }
                     ]
                 }
