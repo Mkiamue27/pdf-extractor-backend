@@ -284,7 +284,7 @@ app.post('/extract-invoice', upload.single('file'), async (req, res) => {
                         {
                             type: "image+_url",
                             Image_url: {
-                               url: "data:image/jpeg;base64, + pdfBase64
+                               url: "data:image/jpeg;base64," + pdfBase64
                             }
                         }
                     ]
