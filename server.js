@@ -282,9 +282,10 @@ app.post('/extract-invoice', upload.single('file'), async (req, res) => {
                             text: "Convert the text content of this invoice into raw CSV rows. Provide columns for Invoice Number, Invoice Date, Bill To, Address, Phone, Email, Description, Quantity, Unit Price, and Total. Return only the raw CSV rows without markdown blocks." 
                         },
                         {
-                            type: "image+_url",
-                            Image_url: {
-                               url: "data:image/jpeg;base64," + pdfBase64
+                            type: "file",
+                            file: {
+                               filename: "invoice.pdf",
+                               file_data: "data:application/pdf;base64," + pdfBase64
                             }
                         }
                     ]
