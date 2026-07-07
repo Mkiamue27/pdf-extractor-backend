@@ -280,7 +280,7 @@ app.post('/extract-invoice', upload.single('file'), async (req, res) => {
                     content: [
                         { 
                             type: "text", 
-                            text:  `Analyze this financial document (invoice, receipt, statement, medical bill, bank statement, or financial report).
+                            text: `Analyze this financial document (invoice, receipt, statement, medical bill, bank statement, or financial report).
 
 Extract every transactional line item into clean CSV rows.
 
@@ -304,15 +304,17 @@ Issuer Mailing Address
 
 Rules:
 
-- Include a single header row as the first line.
+- Include a single bold header row as the first line, and do not repeat the header anywhere else in the output.
 - Return one CSV row for every transaction or service line item.
 - Repeat the Provider/Issuer Name, Contact Phone, and Mailing Address on every row.
 - Preserve dates exactly as shown in the document.
 - Separate Quantity and CPT/Procedure Code into different columns.
-- If a CPT, HCPCS, ICD, or Procedure Code exists, place it only in the CPT/Procedure Code column.
+- True CPT/HCPCS/Procedure codes are numeric codes (e.g., 99205, 99214, 93010) or alphanumeric HCPCS codes (e.g., G2211). Only these belong in the CPT/Procedure Code column.
+- Descriptive visit-level labels such as "New Patient," "Established Patient," "Level IV," or "Level V" are part of the Line Item Description, not the CPT/Procedure Code column.
+- If a numeric CPT code and a visit-level label both appear in the same line item, place the code in CPT/Procedure Code and append the visit-level label to Line Item Description.
 - Never place CPT codes, account numbers, invoice numbers, phone numbers, ZIP codes, document IDs, or other identifiers into any monetary column.
 - Monetary columns (Gross Amount, Adjustments/Discounts/Tax, Net Responsibility) must contain only monetary values formatted with exactly two decimal places (e.g., 30.00, -4.56, 593.00). Do not include currency symbols.
-- Populate the Currency column using the document's currency (USD, CAD, EUR, GBP, etc.). If the currency cannot be determined, leave it blank.
+- Populate the Currency column using the document's currency (USD, CAD, EUR, GBP, etc.). Infer USD whenever the document shows a U.S. address, U.S. phone number, or dollar amounts and no other currency is indicated. Only leave Currency blank if the currency truly cannot be inferred from any contextual clue in the document.
 - Quantity should contain only numeric values when available. If no quantity exists, leave it blank.
 - Leave any unknown or missing values blank rather than guessing.
 - Preserve negative values for credits, discounts, refunds, or adjustments.
@@ -321,8 +323,8 @@ Rules:
 - Every row must contain exactly 13 comma-separated fields, matching the 13 header columns, including trailing commas for any blank fields at the end of a row.
 - If any field contains a comma, line break, or double quote, wrap that field in double quotes and escape internal double quotes by doubling them, per standard CSV escaping rules.
 - Return only raw CSV rows.
-- Do not include Markdown, code blocks, explanations, notes, or additional text.` 
-                        },
+- Do not include Markdown, code blocks, explanations, notes, or additional text.`, 
+                           },
                         {
                             type: "file",
                             file: {
