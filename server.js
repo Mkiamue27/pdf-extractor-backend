@@ -181,57 +181,54 @@ app.get('/health', (req, res) => {
 
 // Middleware to enforce monthly subscription limits
 async function checkUsageLimit(req, res, next) {
-  // Extracting firebase_uid from the request body passed by your app
   const { firebase_uid } = req.body; 
-  
-  if (!firebase_uid) {
-    return res.status(400).json({ error: "Missing firebase_uid in request body." });
-  }
+  if (!firebase_uid) return res.status(400).json({ error: "Missing firebase_uid" });
 
   try {
-    // 1. Fetch user subscription status from your Subscriptions table
-    const { data: subscription, error: subError } = await supabase
+    // 1. Fetch user subscription status
+    const { data: subscription } = await supabase
       .from('Subscriptions')
       .select('status, plan_name')
       .eq('firebase_uid', firebase_uid)
       .maybeSingle();
 
-    // Determine plan status
     const currentPlan = (subscription && subscription.status === 'active') ? subscription.plan_name : 'free';
+    
+    // If they are on a paid plan, skip the free cap checks completely
+    if (currentPlan !== 'free') return next();
 
-    // If they are on an active paid plan (starter, pro, business), bypass the free cap checks
-    if (currentPlan !== 'free') {
-      return next();
-    }
-
-    // 2. Count the user's extractions for the current calendar month
+    // 2. Count current usage for the calendar month
     const startOfMonth = new Date();
     startOfMonth.setDate(1);
-    startOfMonth.setHours(0, 0, 0, 0);
+    startOfMonth.setHours(0,0,0,0);
 
-    const { count, error: countError } = await supabase
+    const { count, error } = await supabase
       .from('Extractions')
       .select('*', { count: 'exact', head: true })
       .eq('firebase_uid', firebase_uid)
       .gte('created_at', startOfMonth.toISOString());
 
-    if (countError) throw countError;
+    if (error) throw error;
 
-    // 3. Enforce the Free Tier limit
+    // 3. Count incoming batch files
+    // Multer populates req.files for array uploads
+    const incomingFilesCount = req.files ? req.files.length : 1; 
+    const totalProjectedCount = count + incomingFilesCount;
+    
     const FREE_LIMIT = 10;
-    if (count >= FREE_LIMIT) {
-      return res.status(403).json({
-        error: "Usage limit reached",
-        message: `You have used all ${FREE_LIMIT} free document extractions for this month. Please upgrade your plan to continue.`,
-        limitReached: true
+    if (totalProjectedCount > FREE_LIMIT) {
+      const remainingRows = FREE_LIMIT - count;
+      return res.status(403).json({ 
+        error: "Limit reached", 
+        message: `You only have ${remainingRows} free extraction(s) left this month, but you uploaded ${incomingFilesCount} files. Please upgrade your tier to process them all.`,
+        limitReached: true 
       });
     }
 
-    // All clear! Proceed seamlessly to the next handler step
     next();
-  } catch (error) {
-    console.error("Usage limit verification fallback error:", error);
-    return res.status(500).json({ error: "Internal server validation error checking usage tracking." });
+  } catch (err) {
+    console.error("Usage limit verification error:", err);
+    return res.status(500).json({ error: "Server check error" });
   }
 }
 
