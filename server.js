@@ -5,6 +5,7 @@ const Stripe = require('stripe');
 const { OpenAI } = require('openai');
 const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
+const { validateCsv } = require('./validateCsvOutput');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -334,10 +335,15 @@ Rules:
             ]
         });
 
-        const extractedCsv = response.choices[0].message.content;
+        const rawCsv = response.choices[0].message.content;
+        const result = validateCsv(rawCsv);
+
+         if (!result.valid) {
+            console.warn('CSV validation issues:', result.errors);
+         }
 
         res.setHeader('Content-Type', 'text/csv');
-        return res.status(200).send(extractedCsv);
+        return res.status(200).send(result.cleanedCsv);
 
     } catch (error) {
         console.error('Extraction Endpoint Error:', error.message);
