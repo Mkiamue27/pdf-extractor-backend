@@ -405,31 +405,81 @@ Rules:
         return res.status(500).json({ error: 'Internal server error during PDF extraction.' });
          }
        });
+
    app.post('/extract-csv', upload.array('files'), checkUsageLimit, async (req, res) => {
   try {
     if (!req.files || req.files.length === 0) {
       return res.status(400).json({ error: "No files uploaded." });
     }
 
-    let allExtractedData = [];
+    let combinedCsvRows = [];
+    let isFirstFile = true;
 
+    // 1. Loop through every single file uploaded in the batch
     for (const file of req.files) {
-      allExtractedData.push({
-        fileName: file.originalname,
-        status: "Successfully processed"
-      });
+      try {
+        // Convert current file buffer to base64
+        const pdfBase64 = file.buffer.toString('base64');
+
+        // Call OpenAI for this specific file
+        const response = await openai.chat.completions.create({
+          model: "gpt-4o",
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: "Extract the data from this invoice into raw CSV rows matching our 13-field architecture..." },
+                {
+                  type: "image_url",
+                  image_url: {
+                    url: `data:application/pdf;base64,${pdfBase64}`
+                  }
+                }
+              ]
+            }
+          ]
+        });
+
+        const rawCsv = response.choices[0].message.content;
+        const result = validateCsv(rawCsv);
+
+        if (result.valid) {
+          // Split content into lines to handle headers intelligently
+          const lines = result.cleanedCsv.split('\n').filter(line => line.trim() !== '');
+          
+          if (lines.length > 0) {
+            if (isFirstFile) {
+              // Keep the headers from the very first file
+              combinedCsvRows.push(lines[0]);
+              isFirstFile = false;
+            }
+            // Append all data rows (skipping the header line for subsequent files)
+            const dataRows = lines.slice(1);
+            combinedCsvRows.push(...dataRows);
+          }
+        } else {
+          console.warn(`CSV validation issues with file ${file.originalname}:`, result.errors);
+        }
+      } catch (fileError) {
+        console.error(`Failed to process individual file ${file.originalname}:`, fileError);
+        // Continue to the next file even if one fails
+      }
     }
 
-    return res.status(200).json({
-      success: true,
-      data: allExtractedData
-    });
+    // 2. Compile everything back into a single CSV string
+    const finalCsvString = combinedCsvRows.join('\n');
+
+    // 3. Return the single compiled CSV file stream back to FlutterFlow
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="extracted_data.csv"');
+    return res.status(200).send(finalCsvString);
 
   } catch (error) {
     console.error("Batch extraction endpoint error:", error);
     return res.status(500).json({ error: "Internal server extraction failure." });
   }
 });
+ 
    
 /* ============================================================
    SERVER
