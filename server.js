@@ -179,6 +179,62 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Middleware to enforce monthly subscription limits
+async function checkUsageLimit(req, res, next) {
+  // Extracting firebase_uid from the request body passed by your app
+  const { firebase_uid } = req.body; 
+  
+  if (!firebase_uid) {
+    return res.status(400).json({ error: "Missing firebase_uid in request body." });
+  }
+
+  try {
+    // 1. Fetch user subscription status from your Subscriptions table
+    const { data: subscription, error: subError } = await supabase
+      .from('Subscriptions')
+      .select('status, plan_name')
+      .eq('firebase_uid', firebase_uid)
+      .maybeSingle();
+
+    // Determine plan status
+    const currentPlan = (subscription && subscription.status === 'active') ? subscription.plan_name : 'free';
+
+    // If they are on an active paid plan (starter, pro, business), bypass the free cap checks
+    if (currentPlan !== 'free') {
+      return next();
+    }
+
+    // 2. Count the user's extractions for the current calendar month
+    const startOfMonth = new Date();
+    startOfMonth.setDate(1);
+    startOfMonth.setHours(0, 0, 0, 0);
+
+    const { count, error: countError } = await supabase
+      .from('Extractions')
+      .select('*', { count: 'exact', head: true })
+      .eq('firebase_uid', firebase_uid)
+      .gte('created_at', startOfMonth.toISOString());
+
+    if (countError) throw countError;
+
+    // 3. Enforce the Free Tier limit
+    const FREE_LIMIT = 10;
+    if (count >= FREE_LIMIT) {
+      return res.status(403).json({
+        error: "Usage limit reached",
+        message: `You have used all ${FREE_LIMIT} free document extractions for this month. Please upgrade your plan to continue.`,
+        limitReached: true
+      });
+    }
+
+    // All clear! Proceed seamlessly to the next handler step
+    next();
+  } catch (error) {
+    console.error("Usage limit verification fallback error:", error);
+    return res.status(500).json({ error: "Internal server validation error checking usage tracking." });
+  }
+}
+
 /* ============================================================
    GET SUBSCRIPTION ROUTE
 ============================================================ */
