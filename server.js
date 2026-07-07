@@ -279,7 +279,7 @@ app.post('/extract-invoice', upload.single('file'), async (req, res) => {
                     content: [
                         { 
                             type: "text", 
-                            text: "Convert the text content of this invoice into raw CSV rows. Provide columns for Invoice Number, Invoice Date, Bill To, Address, Phone, Email, Description, Quantity, Unit Price, and Total. Return only the raw CSV rows without markdown blocks." 
+                            text: "Analyze this financial document (invoice, receipt, or statement). Extract all transactional line items into clean raw CSV rows. Include columns for: Document Type, Provider/Issuer Name, Document/Account ID, Transaction Date, Line Item Description, Quantity/CPT Code, Gross Amount, Adjustments/Tax, and Net Responsibility. Append the Issuer Contact Phone and Mailing Address to every row. Include a clear header row as the first line. Return only raw CSV rows without markdown blocks." 
                         },
                         {
                             type: "file",
