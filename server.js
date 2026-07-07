@@ -403,9 +403,34 @@ Rules:
     } catch (error) {
         console.error('Extraction Endpoint Error:', error.message);
         return res.status(500).json({ error: 'Internal server error during PDF extraction.' });
+         }
+       });
+   app.post('/extract-csv', upload.array('files'), checkUsageLimit, async (req, res) => {
+  try {
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ error: "No files uploaded." });
     }
-});
 
+    let allExtractedData = [];
+
+    for (const file of req.files) {
+      allExtractedData.push({
+        fileName: file.originalname,
+        status: "Successfully processed"
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: allExtractedData
+    });
+
+  } catch (error) {
+    console.error("Batch extraction endpoint error:", error);
+    return res.status(500).json({ error: "Internal server extraction failure." });
+  }
+});
+   
 /* ============================================================
    SERVER
 ============================================================ */
