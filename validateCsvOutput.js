@@ -140,7 +140,11 @@ function validateCsv(rawCsv, options = {}) {
       return;
     }
 
-    const fields = parseCsvLine(line);
+    // Strip stray markdown emphasis characters (**bold**, __underline__)
+    // that the model occasionally wraps around a repeated header row.
+    const cleanedLine = line.replace(/\*\*/g, '').replace(/__/g, '');
+
+    const fields = parseCsvLine(cleanedLine);
 
     // Detect header rows (first one is kept implicitly via HEADER constant;
     // any repeat, anywhere in the output, is dropped rather than treated as data)
