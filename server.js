@@ -422,7 +422,7 @@ Rules:
         const pdfBase64 = file.buffer.toString('base64');
 
         // Native fetch request to bypass library module crashes
-        const response = await openai.chat.completions.create({
+       const response = await openai.chat.completions.create({
       model: "gpt-4o",
       messages: [
         {
@@ -443,7 +443,6 @@ Rules:
         }
       ]
     });
-
         const responseData = await openAiResponse.json();
 
         if (responseData.choices && responseData.choices[0]) {
