@@ -1,5 +1,5 @@
 // =============================================================
-// 1. IMPORTS & CONFIGURATION
+// 1. MODULE IMPORTS & CORE VALIDATORS
 // =============================================================
 const express = require('express');
 const cors = require('cors');
@@ -10,25 +10,51 @@ const { createClient } = require('@supabase/supabase-js');
 const pdfParse = require('pdf-parse');
 require('dotenv').config();
 
+// Consolidated inline CSV validator structure
+const validateCsv = (rawText) => {
+  const defaultHeader = "Document Type,Provider/Issuer Name,Document/Account ID,Transaction Date,Line Item Description,Quantity,CPT/Procedure Code,Gross Amount,Adjustments/Discounts/Tax,Net Responsibility,Currency,Issuer Contact Phone,Issuer Mailing Address";
+  
+  if (!rawText || !rawText.trim()) {
+    return { cleanedCsv: defaultHeader + "\n", isValid: false, rowCount: 0 };
+  }
+
+  let cleanText = rawText.replace(/```csv/gi, '').replace(/```/g, '').trim();
+  const lines = cleanText.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+  
+  if (lines.length === 0) {
+    return { cleanedCsv: defaultHeader + "\n", isValid: false, rowCount: 0 };
+  }
+
+  if (!lines[0].toLowerCase().includes("document type") && !lines[0].toLowerCase().includes("provider")) {
+    lines.unshift(defaultHeader);
+  }
+
+  return {
+    cleanedCsv: lines.join('\n'),
+    isValid: true,
+    rowCount: lines.length - 1
+  };
+};
+
+// =============================================================
+// 2. RESOURCE INITIALIZATIONS
+// =============================================================
 const app = express();
 const port = process.env.PORT || 3000;
 
-// =============================================================
-// GLOBAL CONFIGURATION & CORE INITIALIZATIONS
-// =============================================================
 const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+  apiKey: process.env.OPENAI_API_KEY || ''
 });
 
-const stripe = new Stripe(process.env.STRIPE_API_KEY);
-const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
+const stripe = new Stripe(process.env.STRIPE_API_KEY || '');
+const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET || '';
 
 const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
+  process.env.SUPABASE_URL || '',
+  process.env.SUPABASE_SERVICE_ROLE_KEY || ''
 );
 
-// High-fidelity extraction instructions
+// High-fidelity extraction system instructions
 const DETAILED_EXTRACTION_PROMPT = `Analyze this financial document (invoice, receipt, statement, medical bill, bank statement, or financial report).
 
 Extract every transactional line item into clean CSV rows.
@@ -74,46 +100,8 @@ Rules:
 - Do not include Markdown, code blocks, explanations, notes, or additional text.`;
 
 // =============================================================
-// UTILITIES & HELPER MIDDLEWARE
+// 3. SUBSCRIPTION & USAGE HANDLERS
 // =============================================================
-
-const validateCsv = (rawText) => {
-  if (!rawText || !rawText.trim()) {
-    return {
-      cleanedCsv: "Document Type,Provider/Issuer Name,Document/Account ID,Transaction Date,Line Item Description,Quantity,CPT/Procedure Code,Gross Amount,Adjustments/Discounts/Tax,Net Responsibility,Currency,Issuer Contact Phone,Issuer Mailing Address\n",
-      isValid: false,
-      rowCount: 0
-    };
-  }
-
-  // Strip Markdown markers if OpenAI adds them
-  let cleanText = rawText.replace(/```csv/gi, '').replace(/```/g, '').trim();
-  
-  // Split into lines and filter empty rows
-  const lines = cleanText.split('\n').map(line => line.trim()).filter(line => line.length > 0);
-  
-  if (lines.length === 0) {
-    return {
-      cleanedCsv: "Document Type,Provider/Issuer Name,Document/Account ID,Transaction Date,Line Item Description,Quantity,CPT/Procedure Code,Gross Amount,Adjustments/Discounts/Tax,Net Responsibility,Currency,Issuer Contact Phone,Issuer Mailing Address\n",
-      isValid: false,
-      rowCount: 0
-    };
-  }
-
-  // Check if header row is present, if not prepended
-  const defaultHeader = "Document Type,Provider/Issuer Name,Document/Account ID,Transaction Date,Line Item Description,Quantity,CPT/Procedure Code,Gross Amount,Adjustments/Discounts/Tax,Net Responsibility,Currency,Issuer Contact Phone,Issuer Mailing Address";
-  
-  if (!lines[0].toLowerCase().includes("document type") && !lines[0].toLowerCase().includes("provider")) {
-    lines.unshift(defaultHeader);
-  }
-
-  return {
-    cleanedCsv: lines.join('\n'),
-    isValid: true,
-    rowCount: lines.length - 1
-  };
-};
-
 async function upsertSubscription(subscription, status) {
   const customerId = subscription.customer;
   const userId = subscription.metadata?.user_id || null;
@@ -185,70 +173,59 @@ async function checkUsageLimit(req, res, next) {
 }
 
 // =============================================================
-// 2. STRIPE WEBHOOK (RAW BODY) — MUST BE FIRST
+// 4. STRIPE WEBHOOK LAYER (USES RAW PARSER)
 // =============================================================
-app.post(
-  '/webhook',
-  express.raw({ type: 'application/json' }),
-  async (req, res) => {
-    const sig = req.headers['stripe-signature'];
-    let event;
+app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  let event;
 
-    try {
-      event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
-    } catch (err) {
-      return res.status(400).send(`Webhook Error: ${err.message}`);
-    }
-
-    try {
-      switch (event.type) {
-        case 'checkout.session.completed': {
-          const session = event.data.object;
-          if (session.subscription) {
-            const subscription = await stripe.subscriptions.retrieve(session.subscription);
-            await upsertSubscription(subscription, 'active');
-          }
-          break;
-        }
-        case 'customer.subscription.created':
-        case 'customer.subscription.updated': {
-          const subscription = event.data.object;
-          await upsertSubscription(subscription, subscription.status);
-          break;
-        }
-        case 'customer.subscription.deleted': {
-          const subscription = event.data.object;
-          await upsertSubscription(subscription, 'canceled');
-          break;
-        }
-      }
-      return res.json({ received: true });
-    } catch (err) {
-      return res.status(500).json({ error: 'Webhook processing failed.' });
-    }
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
+  } catch (err) {
+    return res.status(400).send(`Webhook Error: ${err.message}`);
   }
-);
+
+  try {
+    switch (event.type) {
+      case 'checkout.session.completed': {
+        const session = event.data.object;
+        if (session.subscription) {
+          const subscription = await stripe.subscriptions.retrieve(session.subscription);
+          await upsertSubscription(subscription, 'active');
+        }
+        break;
+      }
+      case 'customer.subscription.created':
+      case 'customer.subscription.updated': {
+        const subscription = event.data.object;
+        await upsertSubscription(subscription, subscription.status);
+        break;
+      }
+      case 'customer.subscription.deleted': {
+        const subscription = event.data.object;
+        await upsertSubscription(subscription, 'canceled');
+        break;
+      }
+    }
+    return res.json({ received: true });
+  } catch (err) {
+    return res.status(500).json({ error: 'Webhook processing failed.' });
+  }
+});
 
 // =============================================================
-// 3. NORMAL JSON PARSER — MUST COME AFTER WEBHOOK
+// 5. STANDARD APPLICATION MIDDLEWARE
 // =============================================================
 app.use(express.json());
-
-// =============================================================
-// 4. CORS
-// =============================================================
 app.use(cors());
 
-// =============================================================
-// 5. MULTER — MUST COME AFTER express.json()
-// =============================================================
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 25 * 1024 * 1024 }
 });
 
 // =============================================================
-// 6. CHECKOUT & SUBSCRIPTION ROUTING
+// 6. ENDPOINTS
 // =============================================================
 app.post('/api/v1/checkout/session', async (req, res) => {
   const { priceId, userId, successUrl, cancelUrl } = req.body;
@@ -295,9 +272,6 @@ app.post('/api/v1/subscription/status', async (req, res) => {
   }
 });
 
-// =============================================================
-// 7. PDF EXTRACTION ROUTE — HOLDS UNIVERSAL EXTRACTION LAYER
-// =============================================================
 app.post('/api/v1/extract', upload.array('files'), checkUsageLimit, async (req, res) => {
   console.log("FILES RECEIVED:", req.files);
   console.log("BODY RECEIVED:", req.body);
@@ -317,7 +291,7 @@ app.post('/api/v1/extract', upload.array('files'), checkUsageLimit, async (req, 
       const extractedText = parsedPdf.text || '';
 
       if (!extractedText.trim()) {
-        console.log(`Skipping file ${file.originalname}: Text layer could not be parsed.`);
+        console.log(`Skipping file ${file.originalname}: Text layer empty.`);
         continue;
       }
 
@@ -352,7 +326,6 @@ app.post('/api/v1/extract', upload.array('files'), checkUsageLimit, async (req, 
       return res.status(422).json({ error: "Processing aborted: Document inputs lacked parsable text components." });
     }
 
-    // Save metadata tracking log entry directly to Supabase Extractions table
     await supabase.from('Extractions').insert({
       firebase_uid: firebase_uid,
       file_count: req.files.length,
@@ -372,14 +345,11 @@ app.post('/api/v1/extract', upload.array('files'), checkUsageLimit, async (req, 
 });
 
 // =============================================================
-// 8. HEALTH ROUTES
+// 7. ENVIRONMENT PROBES
 // =============================================================
 app.get('/', (req, res) => res.send('DataExtractAI Engine Operational.'));
 app.get('/health', (req, res) => res.json({ status: 'ok', timestamp: new Date() }));
 
-// =============================================================
-// 9. SERVER START
-// =============================================================
 app.listen(port, () => {
   console.log(`Core application listening cleanly on port ${port}`);
 });
