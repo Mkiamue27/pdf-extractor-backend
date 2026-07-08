@@ -437,7 +437,7 @@ Rules:
                 type: "file",
                 file: {
                     filename: "invoice.pdf",
-                    file_data:`data:application/pdf;base64,${pdfBase64}`
+                    file_data: "data:application/pdf;base64," + pdfBase64
                 }
               }
             ]
