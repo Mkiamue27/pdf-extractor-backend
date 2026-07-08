@@ -421,7 +421,6 @@ Rules:
         // Convert current file buffer to base64
         const pdfBase64 = file.buffer.toString('base64');
 
-        // Call OpenAI for this specific file
         // Native HTTP Post Request directly to OpenAI API
       const openAiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
@@ -450,7 +449,20 @@ Rules:
       });
 
       const responseData = await openAiResponse.json();
-      const rawText = responseData.choices && responseData.choices[0] ? responseData.choices[0].message.content : '';
+      
+      // Safety check to ensure the response payload structure exists
+      if (responseData.choices && responseData.choices[0]) {
+        const rawCsv = responseData.choices[0].message.content || '';
+        
+        // Clean out any accidental markdown code fence markers from the response text
+        const cleanText = rawCsv.replace(/```csv/g, '').replace(/```/g, '').trim();
+        const cleanLines = cleanText.split('\n').filter(line => line.trim() !== '');
+
+        if (cleanLines.length > 0) {
+          // Add the extracted structural content directly into your global collection array
+          combinedCsvRows.push(...cleanLines);
+        }
+      }
        
         if (result.valid) {
           // Split content into lines to handle headers intelligently
