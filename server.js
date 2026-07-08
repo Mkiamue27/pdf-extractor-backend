@@ -422,31 +422,27 @@ Rules:
         const pdfBase64 = file.buffer.toString('base64');
 
         // Native fetch request to bypass library module crashes
-        const openAiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer ' + process.env.OPENAI_API_KEY
-          },
-          body: JSON.stringify({
-            model: "gpt-4o",
-            messages: [
-              {
-                role: "user",
-                content: [
-                  {
-                    type: "text",
-                    text: "Analyze this financial document and extract every transactional line item into clean CSV rows matching our target headers."
-                  },
-                  {
-                    type: "text",
-                    text: "Document Data (Base64):\n" + pdfBase64
-                  }
-                ]
+        const response = await openai.chat.completions.create({
+      model: "gpt-4o",
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "Analyze this document and extract every transactional line item into clean CSV rows matching our target headers."
+            },
+            {
+              type: "file",
+              file: {
+                filename: "invoice.pdf",
+                file_data: "data:application/pdf;base64," + pdfBase64
               }
-            ]
-          })
-        });
+            }
+          ]
+        }
+      ]
+    });
 
         const responseData = await openAiResponse.json();
 
