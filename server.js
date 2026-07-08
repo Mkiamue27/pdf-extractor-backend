@@ -316,7 +316,7 @@ app.post('/create-checkout-session', async (req, res) => {
    EXTRACTION ROUTES
 ============================================================ */
 
-app.post('/extract-invoice', upload.single('file'), async (req, res) => {
+   app.post('/extract-invoice', upload.single('file'), checkUsageLimit, async (req, res) => {
     try {
         if (!req.file) {
             return res.status(400).json({ error: 'No file uploaded under the field name "file".' });
@@ -406,7 +406,7 @@ Rules:
          }
        });
 
-    app.post('/extract-csv', upload.array('files'), async (req, res) => {
+app.post('/extract-csv', upload.array('files'), checkUsageLimit, async (req, res) => { 
   try {
     if (!req.files || req.files.length === 0) {
       return res.status(400).json({ error: "No files uploaded." });
