@@ -77,14 +77,42 @@ Rules:
 // UTILITIES & HELPER MIDDLEWARE
 // =============================================================
 
-function validateCsv(rawCsvText) {
-  if (!rawCsvText || !rawCsvText.trim()) {
-    return { cleanedCsv: "Document Type,Provider/Issuer Name,Document/Account ID,Transaction Date,Line Item Description,Quantity,CPT/Procedure Code,Gross Amount,Adjustments/Discounts/Tax,Net Responsibility,Currency,Issuer Contact Phone,Issuer Mailing Address\n" };
+const validateCsv = (rawText) => {
+  if (!rawText || !rawText.trim()) {
+    return {
+      cleanedCsv: "Document Type,Provider/Issuer Name,Document/Account ID,Transaction Date,Line Item Description,Quantity,CPT/Procedure Code,Gross Amount,Adjustments/Discounts/Tax,Net Responsibility,Currency,Issuer Contact Phone,Issuer Mailing Address\n",
+      isValid: false,
+      rowCount: 0
+    };
   }
-  const cleanText = rawCsvText.replace(/```csv/gi, '').replace(/```/g, '').trim();
-  const lines = cleanText.split('\n').map(l => l.trim()).filter(Boolean);
-  return { cleanedCsv: lines.join('\n') };
-}
+
+  // Strip Markdown markers if OpenAI adds them
+  let cleanText = rawText.replace(/```csv/gi, '').replace(/```/g, '').trim();
+  
+  // Split into lines and filter empty rows
+  const lines = cleanText.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+  
+  if (lines.length === 0) {
+    return {
+      cleanedCsv: "Document Type,Provider/Issuer Name,Document/Account ID,Transaction Date,Line Item Description,Quantity,CPT/Procedure Code,Gross Amount,Adjustments/Discounts/Tax,Net Responsibility,Currency,Issuer Contact Phone,Issuer Mailing Address\n",
+      isValid: false,
+      rowCount: 0
+    };
+  }
+
+  // Check if header row is present, if not prepended
+  const defaultHeader = "Document Type,Provider/Issuer Name,Document/Account ID,Transaction Date,Line Item Description,Quantity,CPT/Procedure Code,Gross Amount,Adjustments/Discounts/Tax,Net Responsibility,Currency,Issuer Contact Phone,Issuer Mailing Address";
+  
+  if (!lines[0].toLowerCase().includes("document type") && !lines[0].toLowerCase().includes("provider")) {
+    lines.unshift(defaultHeader);
+  }
+
+  return {
+    cleanedCsv: lines.join('\n'),
+    isValid: true,
+    rowCount: lines.length - 1
+  };
+};
 
 async function upsertSubscription(subscription, status) {
   const customerId = subscription.customer;
@@ -235,7 +263,7 @@ app.post('/api/v1/checkout/session', async (req, res) => {
       success_url: successUrl,
       cancel_url: cancelUrl
     });
-    return res.status(200).json({ url: targetSession.url });
+    return res.json({ url: targetSession.url });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
@@ -256,7 +284,7 @@ app.post('/api/v1/subscription/status', async (req, res) => {
       return res.json({ plan: 'free', status: 'inactive', current_period_end: null, cancel_at_period_end: false });
     }
 
-    return res.status(200).json({
+    return res.json({
       plan: data.plan_name || 'free',
       status: data.status || 'inactive',
       current_period_end: data.current_period_end,
@@ -274,6 +302,8 @@ app.post('/api/v1/extract', upload.array('files'), checkUsageLimit, async (req, 
   console.log("FILES RECEIVED:", req.files);
   console.log("BODY RECEIVED:", req.body);
 
+  const firebase_uid = req.body.firebase_uid || req.query.firebase_uid;
+
   if (!req.files || req.files.length === 0) {
     return res.status(400).json({ error: "Ingestion parameter failure. Form-key matching 'files' array context is empty." });
   }
@@ -283,7 +313,6 @@ app.post('/api/v1/extract', upload.array('files'), checkUsageLimit, async (req, 
     let runtimeHeadersAdded = false;
 
     for (const file of req.files) {
-      // Direct raw text buffer collection
       const parsedPdf = await pdfParse(file.buffer);
       const extractedText = parsedPdf.text || '';
 
@@ -292,7 +321,6 @@ app.post('/api/v1/extract', upload.array('files'), checkUsageLimit, async (req, 
         continue;
       }
 
-      // Hit OpenAI text-completion structures natively 
       const response = await openai.chat.completions.create({
         model: "gpt-4o",
         temperature: 0.0,
@@ -313,16 +341,23 @@ app.post('/api/v1/extract', upload.array('files'), checkUsageLimit, async (req, 
 
       if (lines.length > 0) {
         if (!runtimeHeadersAdded) {
-          combinedRows.push(lines[0]); // Header insertion
+          combinedRows.push(lines[0]); 
           runtimeHeadersAdded = true;
         }
-        combinedRows.push(...lines.slice(1)); // Data rows insertion
+        combinedRows.push(...lines.slice(1)); 
       }
     }
 
     if (combinedRows.length === 0) {
       return res.status(422).json({ error: "Processing aborted: Document inputs lacked parsable text components." });
     }
+
+    // Save metadata tracking log entry directly to Supabase Extractions table
+    await supabase.from('Extractions').insert({
+      firebase_uid: firebase_uid,
+      file_count: req.files.length,
+      created_at: new Date().toISOString()
+    });
 
     const unifiedExportString = combinedRows.join('\n');
 
