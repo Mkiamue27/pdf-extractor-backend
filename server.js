@@ -406,101 +406,88 @@ Rules:
          }
        });
 
-   app.post('/extract-csv', upload.array('files'), async (req, res) => {
+    app.post('/extract-csv', upload.array('files'), async (req, res) => {
   try {
     if (!req.files || req.files.length === 0) {
       return res.status(400).json({ error: "No files uploaded." });
     }
 
-    let combinedCsvRows = [];
-    let isFirstFile = true;
+    // 1. Create a master array outside the loop to collect all rows
+    const allCsvRows = [];
+    let headersAdded = false;
 
-    // 1. Loop through every single file uploaded in the batch
+    // Start looping through every uploaded file
     for (const file of req.files) {
       try {
-        // Convert current file buffer to base64
         const pdfBase64 = file.buffer.toString('base64');
 
-        // Native HTTP Post Request directly to OpenAI API
-      const openAiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ' + process.env.OPENAI_API_KEY
-        },
-        body: JSON.stringify({
-          model: "gpt-4o",
-          messages: [
-            {
-              role: "user",
-              content: [
-                {
-                  type: "text",
-                  text: "Analyze this financial document and extract every transactional line item into clean CSV rows matching our target headers."
-                },
-                {
-                  type: "text",
-                  text: "Document Data (Base64):\n" + pdfBase64
-                }
-              ]
-            }
-          ]
-        })
-      });
+        // Native fetch request to bypass library module crashes
+        const openAiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + process.env.OPENAI_API_KEY
+          },
+          body: JSON.stringify({
+            model: "gpt-4o",
+            messages: [
+              {
+                role: "user",
+                content: [
+                  {
+                    type: "text",
+                    text: "Analyze this financial document and extract every transactional line item into clean CSV rows matching our target headers."
+                  },
+                  {
+                    type: "text",
+                    text: "Document Data (Base64):\n" + pdfBase64
+                  }
+                ]
+              }
+            ]
+          })
+        });
 
-      const responseData = await openAiResponse.json();
-      
-      // Safety check to ensure the response payload structure exists
-      if (responseData.choices && responseData.choices[0]) {
-        const rawCsv = responseData.choices[0].message.content || '';
-        
-        // Clean out any accidental markdown code fence markers from the response text
-        const cleanText = rawCsv.replace(/```csv/g, '').replace(/```/g, '').trim();
-        const cleanLines = cleanText.split('\n').filter(line => line.trim() !== '');
+        const responseData = await openAiResponse.json();
 
-        if (cleanLines.length > 0) {
-          // Add the extracted structural content directly into your global collection array
-          combinedCsvRows.push(...cleanLines);
-        }
-      }
-       
-        if (result.valid) {
-          // Split content into lines to handle headers intelligently
-          const lines = result.cleanedCsv.split('\n').filter(line => line.trim() !== '');
+        if (responseData.choices && responseData.choices[0]) {
+          const rawCsv = responseData.choices[0].message.content || '';
           
-          if (lines.length > 0) {
-            if (isFirstFile) {
-              // Keep the headers from the very first file
-              combinedCsvRows.push(lines[0]);
-              isFirstFile = false;
+          // Strip out markdown formatting blocks if the AI includes them
+          const cleanText = rawCsv.replace(/```csv/g, '').replace(/```/g, '').trim();
+          const cleanLines = cleanText.split('\n').filter(line => line.trim() !== '');
+
+          if (cleanLines.length > 0) {
+            // Keep headers from the first file. Skip them for all other files.
+            if (!headersAdded) {
+              allCsvRows.push(cleanLines[0]); // Add Header Row
+              headersAdded = true;
             }
-            // Append all data rows (skipping the header line for subsequent files)
-            const dataRows = lines.slice(1);
-            combinedCsvRows.push(...dataRows);
+            
+            // Append only the data rows to our master collection
+            const dataRows = cleanLines.slice(1);
+            allCsvRows.push(...dataRows);
           }
-        } else {
-          console.warn(`CSV validation issues with file ${file.originalname}:`, result.errors);
         }
       } catch (fileError) {
-        console.error(`Failed to process individual file ${file.originalname}:`, fileError);
-        // Continue to the next file even if one fails
+        console.error(`Failed to process an individual file:`, fileError);
+        // Continue processing remaining files even if one fails
       }
     }
 
-    // 2. Compile everything back into a single CSV string
-    const finalCsvString = combinedCsvRows.join('\n');
+    // 2. Combine all gathered rows across all files together
+    const finalCsvString = allCsvRows.join('\n');
 
-    // 3. Return the single compiled CSV file stream back to FlutterFlow
+    // 3. Return the compiled data stream cleanly back to FlutterFlow
     res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', 'attachment; filename="extracted_data.csv"');
+    res.setHeader('Content-Disposition', 'attachment; filename=extracted_data.csv');
     return res.status(200).send(finalCsvString);
 
   } catch (error) {
     console.error("Batch extraction endpoint error:", error);
-    return res.status(500).json({ error: "Internal server extraction failure." });
+    return res.status(500).json({ error: "Internal server extraction error" });
   }
-});
- 
+});  
    
 /* ============================================================
    SERVER
