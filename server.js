@@ -33,7 +33,7 @@ const supabase = createClient(
 app.use(cors());
 
 /* ============================================================
-   SHARED PROMPT BLOCK (Restored Rules)
+   SHARED STRICT PROMPT BLOCK
 ============================================================ */
 
 const DETAILED_EXTRACTION_PROMPT = `Analyze this financial document (invoice, receipt, statement, medical bill, bank statement, or financial report).
@@ -307,7 +307,8 @@ app.post('/extract-invoice', upload.single('file'), checkUsageLimit, async (req,
         ]
     });
 
-    const rawCsv = response.choices[0].message.content;
+    // Native SDK response mapping safely handling choice assignments without raw text crashes
+    const rawCsv = response.choices[0].message.content || '';
     const result = validateCsv(rawCsv);
 
     res.setHeader('Content-Type', 'text/csv');
@@ -362,7 +363,6 @@ app.post('/extract-csv', upload.array('files'), checkUsageLimit, async (req, res
           const cleanLines = cleanText.split('\n').filter(line => line.trim() !== '');
 
           if (cleanLines.length > 0) {
-            // Include headers exactly once from the first parsed document
             if (!headersAdded) {
               allCsvRows.push(cleanLines[0]); 
               headersAdded = true;
