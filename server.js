@@ -1,61 +1,328 @@
-// =============================================================
-// 1. MODULE IMPORTS & CORE VALIDATORS
-// =============================================================
 const express = require('express');
-const cors = require('cors');
 const multer = require('multer');
+const cors = require('cors');
 const Stripe = require('stripe');
 const { OpenAI } = require('openai');
 const { createClient } = require('@supabase/supabase-js');
-const pdfParse = require('pdf-parse');
 require('dotenv').config();
+const { validateCsv, HEADER, toCsvLine } = require('./validateCsvOutput');
 
-// Consolidated inline CSV validator structure
-const validateCsv = (rawText) => {
-  const defaultHeader = "Document Type,Provider/Issuer Name,Document/Account ID,Transaction Date,Line Item Description,Quantity,CPT/Procedure Code,Gross Amount,Adjustments/Discounts/Tax,Net Responsibility,Currency,Issuer Contact Phone,Issuer Mailing Address";
-  
-  if (!rawText || !rawText.trim()) {
-    return { cleanedCsv: defaultHeader + "\n", isValid: false, rowCount: 0 };
-  }
-
-  let cleanText = rawText.replace(/```csv/gi, '').replace(/```/g, '').trim();
-  const lines = cleanText.split('\n').map(line => line.trim()).filter(line => line.length > 0);
-  
-  if (lines.length === 0) {
-    return { cleanedCsv: defaultHeader + "\n", isValid: false, rowCount: 0 };
-  }
-
-  if (!lines[0].toLowerCase().includes("document type") && !lines[0].toLowerCase().includes("provider")) {
-    lines.unshift(defaultHeader);
-  }
-
-  return {
-    cleanedCsv: lines.join('\n'),
-    isValid: true,
-    rowCount: lines.length - 1
-  };
-};
-
-// =============================================================
-// 2. RESOURCE INITIALIZATIONS
-// =============================================================
 const app = express();
 const port = process.env.PORT || 3000;
 
+/* ============================================================
+   SERVICES
+============================================================ */
+
 const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY || ''
+  apiKey: process.env.OPENAI_API_KEY,
 });
 
-const stripe = new Stripe(process.env.STRIPE_API_KEY || '');
-const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET || '';
+const stripe = new Stripe(process.env.STRIPE_API_KEY);
+
+const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
 const supabase = createClient(
-  process.env.SUPABASE_URL || '',
-  process.env.SUPABASE_SERVICE_ROLE_KEY || ''
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// High-fidelity extraction system instructions
-const DETAILED_EXTRACTION_PROMPT = `Analyze this financial document (invoice, receipt, statement, medical bill, bank statement, or financial report).
+/* ============================================================
+   MIDDLEWARE
+============================================================ */
+
+app.use(cors());
+
+/* ============================================================
+   HELPER FUNCTION
+============================================================ */
+
+async function upsertSubscription(subscription, status) {
+  const customerId = subscription.customer;
+  const userId = subscription.metadata?.user_id || null;
+  const priceId = subscription.items?.data?.[0]?.price?.id || null;
+
+  const planName =
+    priceId === process.env.STARTER_PRICE_ID ? 'starter' :
+    priceId === process.env.PRO_PRICE_ID ? 'pro' :
+    priceId === process.env.BUSINESS_PRICE_ID ? 'business' : 'free';
+
+  console.log('Price ID received:', priceId);
+  console.log('Plan name resolved:', planName);
+  console.log('current_period_end raw:', subscription.current_period_end);
+
+  const payload = {
+    firebase_uid: userId,
+    stripe_customer_id: customerId,
+    stripe_subscription_id: subscription.id,
+    plan_name: planName,
+    status: status,
+    price_id: priceId,
+    current_period_end: subscription.current_period_end
+       ? new Date(subscription.current_period_end * 1000)
+      : null,
+    cancel_at_period_end: subscription.cancel_at_period_end || false,
+    updated_at: new Date(),
+  };
+
+  const { error } = await supabase
+    .from('Subscriptions')
+    .upsert(payload, { onConflict: 'stripe_customer_id' });
+
+  if (error) {
+    console.error('Supabase upsert error:', error.message);
+  } else {
+    console.log('Supabase subscription updated:', customerId);
+  }
+}
+
+/* ============================================================
+   STRIPE WEBHOOK
+   MUST COME BEFORE express.json()
+============================================================ */
+
+app.post(
+  '/webhook',
+  express.raw({ type: 'application/json' }),
+  async (req, res) => {
+    const sig = req.headers['stripe-signature'];
+
+    let event;
+
+    try {
+      event = stripe.webhooks.constructEvent(
+        req.body,
+        sig,
+        endpointSecret
+      );
+    } catch (err) {
+      console.error('Webhook verification failed:', err.message);
+      return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
+
+    try {
+
+      switch (event.type) {
+
+        case 'checkout.session.completed': {
+          const session = event.data.object;
+          console.log('Checkout Completed');
+
+          if (session.subscription) {
+            const subscription = await stripe.subscriptions.retrieve(
+              session.subscription
+            );
+            await upsertSubscription(subscription, 'active');
+          }
+
+          break;
+        }
+
+        case 'customer.subscription.created': {
+           const subscription = await stripe.subscriptions.retrieve(event.data.object.id);
+           console.log('Subscription Created');
+           await upsertSubscription(subscription, subscription.status);
+           break;
+        }
+
+        case 'customer.subscription.updated': {
+          const subscription = event.data.object;
+          console.log('Subscription Updated');
+          await upsertSubscription(subscription, subscription.status);
+          break;
+        }
+
+        case 'customer.subscription.deleted': {
+          const subscription = event.data.object;
+          console.log('Subscription Deleted');
+          await upsertSubscription(subscription, 'canceled');
+          break;
+        }
+
+        default:
+          console.log(`Unhandled event: ${event.type}`);
+      }
+
+      res.json({ received: true });
+
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({
+        error: 'Webhook processing failed.',
+      });
+    }
+  }
+);
+
+/* ============================================================
+   NORMAL JSON PARSER
+============================================================ */
+
+app.use(express.json());
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+});
+
+/* ============================================================
+   HEALTH ROUTES
+============================================================ */
+
+app.get('/', (req, res) => {
+  res.send('PDF CSV Extractor API Running');
+});
+
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+  });
+});
+
+/* ============================================================
+   USAGE LIMIT MIDDLEWARE
+   Must run AFTER multer (upload.single / upload.array) so that
+   req.body and req.files are already populated.
+============================================================ */
+
+async function checkUsageLimit(req, res, next) {
+  const { firebase_uid } = req.body;
+  if (!firebase_uid) return res.status(400).json({ error: "Missing firebase_uid" });
+
+  try {
+    // 1. Fetch user subscription status
+    const { data: subscription } = await supabase
+      .from('Subscriptions')
+      .select('status, plan_name')
+      .eq('firebase_uid', firebase_uid)
+      .maybeSingle();
+
+    const currentPlan = (subscription && subscription.status === 'active') ? subscription.plan_name : 'free';
+
+    // If they are on a paid plan, skip the free cap checks completely
+    if (currentPlan !== 'free') return next();
+
+    // 2. Count current usage for the calendar month
+    const startOfMonth = new Date();
+    startOfMonth.setDate(1);
+    startOfMonth.setHours(0, 0, 0, 0);
+
+    const { count, error } = await supabase
+      .from('Extractions')
+      .select('*', { count: 'exact', head: true })
+      .eq('firebase_uid', firebase_uid)
+      .gte('created_at', startOfMonth.toISOString());
+
+    if (error) throw error;
+
+    // 3. Count incoming batch files (req.files for array uploads, else 1 for single)
+    const incomingFilesCount = req.files ? req.files.length : 1;
+    const totalProjectedCount = count + incomingFilesCount;
+
+    const FREE_LIMIT = 10;
+    if (totalProjectedCount > FREE_LIMIT) {
+      const remainingRows = FREE_LIMIT - count;
+      return res.status(403).json({
+        error: "Limit reached",
+        message: `You only have ${remainingRows} free extraction(s) left this month, but you uploaded ${incomingFilesCount} files. Please upgrade your tier to process them all.`,
+        limitReached: true
+      });
+    }
+
+    next();
+  } catch (err) {
+    console.error("Usage limit verification error:", err);
+    return res.status(500).json({ error: "Server check error" });
+  }
+}
+
+/* ============================================================
+   GET SUBSCRIPTION ROUTE
+============================================================ */
+
+app.get('/get-subscription', async (req, res) => {
+  const { uid } = req.query;
+
+  if (!uid) {
+    return res.status(400).json({ error: 'uid is required.' });
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('Subscriptions')
+      .select('plan_name, status, current_period_end, cancel_at_period_end')
+      .eq('firebase_uid', uid)
+      .single();
+
+    if (error || !data) {
+      return res.json({
+        plan: 'free',
+        status: 'inactive',
+        current_period_end: null,
+        cancel_at_period_end: false,
+      });
+    }
+
+    res.json({
+      plan: data.plan_name || 'free',
+      status: data.status || 'inactive',
+      current_period_end: data.current_period_end,
+      cancel_at_period_end: data.cancel_at_period_end,
+    });
+
+  } catch (err) {
+    console.error('Get subscription error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* ============================================================
+   CHECKOUT SESSION ROUTE
+============================================================ */
+
+app.post('/create-checkout-session', async (req, res) => {
+  const { priceId, userId, successUrl, cancelUrl } = req.body;
+
+  if (!priceId || !userId) {
+    return res.status(400).json({
+      error: 'priceId and userId are required.',
+    });
+  }
+
+  try {
+    const session = await stripe.checkout.sessions.create({
+      mode: 'subscription',
+      payment_method_types: ['card'],
+      line_items: [
+        {
+          price: priceId,
+          quantity: 1,
+        },
+      ],
+      subscription_data: {
+        metadata: {
+          user_id: userId,
+        },
+      },
+      success_url: successUrl || 'https://yourapp.com/success',
+      cancel_url: cancelUrl || 'https://yourapp.com/cancel',
+    });
+
+    res.json({ url: session.url });
+
+  } catch (err) {
+    console.error('Checkout session error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* ============================================================
+   SHARED EXTRACTION PROMPT
+   (Used by both single-file and batch routes so behavior stays
+   consistent regardless of how many files are uploaded.)
+============================================================ */
+
+const EXTRACTION_PROMPT = `Analyze this financial document (invoice, receipt, statement, medical bill, bank statement, or financial report).
 
 Extract every transactional line item into clean CSV rows.
 
@@ -78,7 +345,8 @@ Issuer Contact Phone,
 Issuer Mailing Address
 
 Rules:
-- Include a single header row as the first line, and do not repeat the header anywhere else in the output.
+
+- Include a single header row as the first line, and do not repeat the header anywhere else in the output. Under no circumstances repeat the header row anywhere in the output, including inside markdown formatting such as bold or italics.
 - Return one CSV row for every transaction or service line item.
 - Repeat the Provider/Issuer Name, Contact Phone, and Mailing Address on every row.
 - Preserve dates exactly as shown in the document.
@@ -99,257 +367,136 @@ Rules:
 - Return only raw CSV rows.
 - Do not include Markdown, code blocks, explanations, notes, or additional text.`;
 
-// =============================================================
-// 3. SUBSCRIPTION & USAGE HANDLERS
-// =============================================================
-async function upsertSubscription(subscription, status) {
-  const customerId = subscription.customer;
-  const userId = subscription.metadata?.user_id || null;
-  const priceId = subscription.items?.data?.[0]?.price?.id || null;
+/* ============================================================
+   EXTRACTION ROUTES
+============================================================ */
 
-  const planName =
-    priceId === process.env.STARTER_PRICE_ID ? 'starter' :
-    priceId === process.env.PRO_PRICE_ID ? 'pro' :
-    priceId === process.env.BUSINESS_PRICE_ID ? 'business' : 'free';
-
-  const payload = {
-    firebase_uid: userId,
-    stripe_customer_id: customerId,
-    stripe_subscription_id: subscription.id,
-    plan_name: planName,
-    status: status,
-    price_id: priceId,
-    current_period_end: subscription.current_period_end ? new Date(subscription.current_period_end * 1000) : null,
-    cancel_at_period_end: subscription.cancel_at_period_end || false,
-    updated_at: new Date()
-  };
-
-  await supabase
-    .from('Subscriptions')
-    .upsert(payload, { onConflict: 'stripe_customer_id' });
-}
-
-async function checkUsageLimit(req, res, next) {
-  const firebase_uid = req.body.firebase_uid || req.query.firebase_uid;
-  if (!firebase_uid) {
-    return res.status(400).json({ error: "Access verification failed. Field parameter 'firebase_uid' must be supplied." });
-  }
-
-  try {
-    const { data: profile } = await supabase
-      .from('Subscriptions')
-      .select('status, plan_name')
-      .eq('firebase_uid', firebase_uid)
-      .maybeSingle();
-
-    const activePlan = (profile && profile.status === 'active') ? profile.plan_name : 'free';
-    if (activePlan !== 'free') return next();
-
-    const genesisPeriod = new Date();
-    genesisPeriod.setDate(1);
-    genesisPeriod.setHours(0,0,0,0);
-
-    const { count, error } = await supabase
-      .from('Extractions')
-      .select('*', { count: 'exact', head: true })
-      .eq('firebase_uid', firebase_uid)
-      .gte('created_at', genesisPeriod.toISOString());
-
-    if (error) throw error;
-
-    const pipelineVolumeCount = req.files ? req.files.length : 1;
-    if ((count + pipelineVolumeCount) > 10) {
-      return res.status(403).json({
-        error: "Quota Exhausted",
-        message: "You have completed your 10 free trial pipeline provisions.",
-        limitReached: true
-      });
-    }
-
-    next();
-  } catch (err) {
-    next(err);
-  }
-}
-
-// =============================================================
-// 4. STRIPE WEBHOOK LAYER (USES RAW PARSER)
-// =============================================================
-app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-  const sig = req.headers['stripe-signature'];
-  let event;
-
-  try {
-    event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
-  } catch (err) {
-    return res.status(400).send(`Webhook Error: ${err.message}`);
-  }
-
-  try {
-    switch (event.type) {
-      case 'checkout.session.completed': {
-        const session = event.data.object;
-        if (session.subscription) {
-          const subscription = await stripe.subscriptions.retrieve(session.subscription);
-          await upsertSubscription(subscription, 'active');
+// Single-file extraction
+app.post('/extract-invoice', upload.single('file'), checkUsageLimit, async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ error: 'No file uploaded under the field name "file".' });
         }
-        break;
-      }
-      case 'customer.subscription.created':
-      case 'customer.subscription.updated': {
-        const subscription = event.data.object;
-        await upsertSubscription(subscription, subscription.status);
-        break;
-      }
-      case 'customer.subscription.deleted': {
-        const subscription = event.data.object;
-        await upsertSubscription(subscription, 'canceled');
-        break;
-      }
+
+        const pdfBase64 = req.file.buffer.toString('base64');
+
+        const response = await openai.chat.completions.create({
+            model: "gpt-4o",
+            messages: [
+                {
+                    role: "user",
+                    content: [
+                        {
+                            type: "text",
+                            text: EXTRACTION_PROMPT,
+                        },
+                        {
+                            type: "file",
+                            file: {
+                               filename: "invoice.pdf",
+                               file_data: "data:application/pdf;base64," + pdfBase64
+                            }
+                        }
+                    ]
+                },
+            ]
+        });
+
+        const rawCsv = response.choices[0].message.content;
+        const result = validateCsv(rawCsv);
+
+        if (!result.valid) {
+            console.warn('CSV validation issues:', result.errors);
+        }
+
+        res.setHeader('Content-Type', 'text/csv');
+        return res.status(200).send(result.cleanedCsv);
+
+    } catch (error) {
+        console.error('Extraction Endpoint Error:', error.message);
+        return res.status(500).json({ error: 'Internal server error during PDF extraction.' });
     }
-    return res.json({ received: true });
-  } catch (err) {
-    return res.status(500).json({ error: 'Webhook processing failed.' });
-  }
 });
 
-// =============================================================
-// 5. STANDARD APPLICATION MIDDLEWARE
-// =============================================================
-app.use(express.json());
-app.use(cors());
-
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 25 * 1024 * 1024 }
-});
-
-// =============================================================
-// 6. ENDPOINTS
-// =============================================================
-app.post('/api/v1/checkout/session', async (req, res) => {
-  const { priceId, userId, successUrl, cancelUrl } = req.body;
-  if (!priceId || !userId) return res.status(400).json({ error: "Required sequence metrics are absent." });
-
+// Multi-file batch extraction
+app.post('/extract-csv', upload.array('files'), checkUsageLimit, async (req, res) => {
   try {
-    const targetSession = await stripe.checkout.sessions.create({
-      mode: 'subscription',
-      payment_method_types: ['card'],
-      line_items: [{ price: priceId, quantity: 1 }],
-      subscription_data: { metadata: { user_id: userId } },
-      success_url: successUrl,
-      cancel_url: cancelUrl
-    });
-    return res.json({ url: targetSession.url });
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/v1/subscription/status', async (req, res) => {
-  const { uid } = req.body;
-  if (!uid) return res.status(400).json({ error: "Missing uid key parameter assignment." });
-
-  try {
-    const { data, error } = await supabase
-      .from('Subscriptions')
-      .select('plan_name, status, current_period_end, cancel_at_period_end')
-      .eq('firebase_uid', uid)
-      .maybeSingle();
-
-    if (error || !data) {
-      return res.json({ plan: 'free', status: 'inactive', current_period_end: null, cancel_at_period_end: false });
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ error: "No files uploaded." });
     }
 
-    return res.json({
-      plan: data.plan_name || 'free',
-      status: data.status || 'inactive',
-      current_period_end: data.current_period_end,
-      cancel_at_period_end: data.cancel_at_period_end
-    });
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/v1/extract', upload.array('files'), checkUsageLimit, async (req, res) => {
-  console.log("FILES RECEIVED:", req.files);
-  console.log("BODY RECEIVED:", req.body);
-
-  const firebase_uid = req.body.firebase_uid || req.query.firebase_uid;
-
-  if (!req.files || req.files.length === 0) {
-    return res.status(400).json({ error: "Ingestion parameter failure. Form-key matching 'files' array context is empty." });
-  }
-
-  try {
-    const combinedRows = [];
-    let runtimeHeadersAdded = false;
+    // Collect validated rows from every file into one combined dataset,
+    // rather than trusting each file's raw text directly.
+    const allRows = [];
+    const allErrors = [];
 
     for (const file of req.files) {
-      const parsedPdf = await pdfParse(file.buffer);
-      const extractedText = parsedPdf.text || '';
+      try {
+        const pdfBase64 = file.buffer.toString('base64');
 
-      if (!extractedText.trim()) {
-        console.log(`Skipping file ${file.originalname}: Text layer empty.`);
-        continue;
-      }
+        const response = await openai.chat.completions.create({
+          model: "gpt-4o",
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: EXTRACTION_PROMPT
+                },
+                {
+                  type: "file",
+                  file: {
+                    filename: file.originalname || "invoice.pdf",
+                    file_data: "data:application/pdf;base64," + pdfBase64
+                  }
+                }
+              ]
+            }
+          ]
+        });
 
-      const response = await openai.chat.completions.create({
-        model: "gpt-4o",
-        temperature: 0.0,
-        messages: [
-          {
-            role: "user",
-            content: [
-              { type: "text", text: DETAILED_EXTRACTION_PROMPT },
-              { type: "text", text: `Document raw textual content layer:\n${extractedText}` }
-            ]
-          }
-        ]
-      });
+        const rawCsv = response.choices[0]?.message?.content || '';
+        const result = validateCsv(rawCsv);
 
-      const modelRawResponse = response.choices[0]?.message?.content || '';
-      const parsedExecutionObject = validateCsv(modelRawResponse);
-      const lines = parsedExecutionObject.cleanedCsv.split('\n').filter(Boolean);
-
-      if (lines.length > 0) {
-        if (!runtimeHeadersAdded) {
-          combinedRows.push(lines[0]); 
-          runtimeHeadersAdded = true;
+        if (!result.valid) {
+          console.warn(`CSV validation issues for ${file.originalname}:`, result.errors);
+          allErrors.push({ file: file.originalname, errors: result.errors });
         }
-        combinedRows.push(...lines.slice(1)); 
+
+        // result.rows already excludes header rows and pads short rows,
+        // so we only need the data rows here — the combined header gets
+        // added once at the very end.
+        allRows.push(...result.rows);
+
+      } catch (fileError) {
+        console.error(`Failed to process file ${file.originalname}:`, fileError.message);
+        allErrors.push({ file: file.originalname, errors: [fileError.message] });
+        // Continue processing remaining files even if one fails
       }
     }
 
-    if (combinedRows.length === 0) {
-      return res.status(422).json({ error: "Processing aborted: Document inputs lacked parsable text components." });
+    // Build one combined CSV from the shared HEADER + every file's rows.
+    const finalCsvString = [HEADER, ...allRows].map(toCsvLine).join('\n');
+
+    if (allErrors.length > 0) {
+      console.warn('Batch extraction completed with some issues:', allErrors);
     }
-
-    await supabase.from('Extractions').insert({
-      firebase_uid: firebase_uid,
-      file_count: req.files.length,
-      created_at: new Date().toISOString()
-    });
-
-    const unifiedExportString = combinedRows.join('\n');
 
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', 'attachment; filename=extracted_data.csv');
-    return res.status(200).send(unifiedExportString);
+    return res.status(200).send(finalCsvString);
 
-  } catch (err) {
-    console.error("Extraction error context:", err);
-    return res.status(500).json({ error: "Extraction pipeline broke during sequence execution." });
+  } catch (error) {
+    console.error("Batch extraction endpoint error:", error);
+    return res.status(500).json({ error: "Internal server extraction error" });
   }
 });
 
-// =============================================================
-// 7. ENVIRONMENT PROBES
-// =============================================================
-app.get('/', (req, res) => res.send('DataExtractAI Engine Operational.'));
-app.get('/health', (req, res) => res.json({ status: 'ok', timestamp: new Date() }));
+/* ============================================================
+   SERVER
+============================================================ */
 
 app.listen(port, () => {
-  console.log(`Core application listening cleanly on port ${port}`);
+  console.log(`Server listening on port ${port}`);
 });
