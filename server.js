@@ -6,7 +6,7 @@ const { OpenAI } = require('openai');
 const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
 const { validateCsv, HEADER, toCsvLine } = require('./validateCsvOutput');
-const extractionRoutes = require("./routes/extraction");
+
 const app = express();
 const port = process.env.PORT || 3000;
 
